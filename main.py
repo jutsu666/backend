@@ -15,10 +15,22 @@ PLAYEROK_TOKEN = os.getenv("PLAYEROK_TOKEN", "").strip()
 PLAYEROK_USER_AGENT = os.getenv("PLAYEROK_USER_AGENT", "").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*").strip()
 
-if not PLAYEROK_TOKEN:
-    raise RuntimeError("PLAYEROK_TOKEN is not set")
-if not PLAYEROK_USER_AGENT:
-    raise RuntimeError("PLAYEROK_USER_AGENT is not set")
+# Прокси через env. Не хардкодь секреты в коде.
+HTTP_PROXY = os.getenv("HTTP_PROXY", "").strip()
+HTTPS_PROXY = os.getenv("HTTPS_PROXY", "").strip()
+
+# Если библиотека/requests/httpx уважают стандартные env-переменные,
+# этого обычно достаточно.
+if HTTP_PROXY:
+    os.environ["HTTP_PROXY"] = HTTP_PROXY
+    os.environ["http_proxy"] = HTTP_PROXY
+
+if HTTPS_PROXY:
+    os.environ["HTTPS_PROXY"] = HTTPS_PROXY
+    os.environ["https_proxy"] = HTTPS_PROXY
+elif HTTP_PROXY:
+    os.environ["HTTPS_PROXY"] = HTTP_PROXY
+    os.environ["https_proxy"] = HTTP_PROXY
 
 app = FastAPI(title=APP_TITLE)
 
@@ -95,11 +107,16 @@ def is_today(value: Any) -> bool:
 
 def get_account() -> Account:
     global account
+    if not PLAYEROK_TOKEN:
+        raise RuntimeError("PLAYEROK_TOKEN is not set")
+    if not PLAYEROK_USER_AGENT:
+        raise RuntimeError("PLAYEROK_USER_AGENT is not set")
+
     if account is None:
         account = Account(
             token=PLAYEROK_TOKEN,
             user_agent=PLAYEROK_USER_AGENT,
-        ).get()
+        )
     return account
 
 
@@ -136,7 +153,7 @@ def normalize_deal(deal: Any) -> Dict[str, Any]:
 
 
 def fetch_recent_outgoing_deals(max_pages: int = 5, page_size: int = 24) -> List[Dict[str, Any]]:
-    acc = get_account()
+    acc = get_account().get()
     all_deals: List[Dict[str, Any]] = []
     after_cursor = None
 
@@ -200,7 +217,6 @@ def build_stats(deals: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def sync_once() -> None:
     global orders_cache, stats_cache, last_error
-
     try:
         deals = fetch_recent_outgoing_deals()
         stats = build_stats(deals)
@@ -227,7 +243,8 @@ def background_sync_loop() -> None:
 
 @app.on_event("startup")
 def startup_event() -> None:
-    sync_once()
+    # НИЧЕГО не синкаем блокирующе на старте.
+    # Сервис поднимется, /health будет жить, а синк пойдёт в фоне.
     thread = threading.Thread(target=background_sync_loop, daemon=True)
     thread.start()
 
@@ -240,6 +257,7 @@ def health() -> Dict[str, Any]:
             "sync_ok": stats_cache.get("sync_ok", False),
             "last_sync_at": stats_cache.get("last_sync_at"),
             "last_error": last_error,
+            "proxy_enabled": bool(HTTP_PROXY or HTTPS_PROXY),
         }
 
 
