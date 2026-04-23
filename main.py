@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from playerokapi import Account
+from playerokapi.account import Account
 from playerokapi.enums import ItemDealDirections, ItemDealStatuses
 
 APP_TITLE = "Playerok Bridge API"
