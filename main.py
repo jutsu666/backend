@@ -278,9 +278,17 @@ def normalize_deal(deal: Any) -> Dict[str, Any]:
     item = getattr(deal, "item", None)
     buyer = getattr(deal, "buyer", None)
     seller = getattr(deal, "seller", None)
+    chat = getattr(deal, "chat", None)
 
     slug = getattr(item, "slug", None) if item else None
     lot_url = playerok_item_url(slug)
+    chat_id = getattr(chat, "id", None) if chat else None
+    chat_url = (
+        getattr(deal, "chat_url", None)
+        or getattr(chat, "url", None)
+        or getattr(chat, "public_url", None)
+        or (f"https://playerok.com/chats/{chat_id}" if chat_id else None)
+    )
 
     return {
         "id": str(getattr(deal, "id", "")),
@@ -294,6 +302,8 @@ def normalize_deal(deal: Any) -> Dict[str, Any]:
         "has_problem": bool(getattr(deal, "has_problem", False)),
         "lot_url": lot_url,
         "item_url": lot_url,
+        "chat_url": chat_url,
+        "buyer_chat_url": chat_url,
         "item": {
             "id": str(getattr(item, "id", "")) if item else None,
             "slug": slug if item else None,
