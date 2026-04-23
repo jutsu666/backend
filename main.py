@@ -1,11 +1,26 @@
 import os
 import threading
 import time
+import shutil
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from pathlib import Path
+import importlib.util
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import certifi
+
+# ---------- FIX FOR PLAYEROKAPI CERT FILE ----------
+# Библиотека ищет cacert.pem внутри playerokapi/, но в деплое Railway файла нет.
+# До импорта playerokapi создаём его из certifi bundle.
+spec = importlib.util.find_spec("playerokapi")
+if spec and spec.submodule_search_locations:
+    pkg_dir = Path(list(spec.submodule_search_locations)[0])
+    target_cert = pkg_dir / "cacert.pem"
+    if not target_cert.exists():
+        target_cert.write_bytes(Path(certifi.where()).read_bytes())
+
 from playerokapi.account import Account
 from playerokapi.enums import ItemDealDirections, ItemDealStatuses
 
@@ -15,12 +30,10 @@ PLAYEROK_TOKEN = os.getenv("PLAYEROK_TOKEN", "").strip()
 PLAYEROK_USER_AGENT = os.getenv("PLAYEROK_USER_AGENT", "").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*").strip()
 
-# Прокси через env. Не хардкодь секреты в коде.
+# Прокси через env
 HTTP_PROXY = os.getenv("HTTP_PROXY", "").strip()
 HTTPS_PROXY = os.getenv("HTTPS_PROXY", "").strip()
 
-# Если библиотека/requests/httpx уважают стандартные env-переменные,
-# этого обычно достаточно.
 if HTTP_PROXY:
     os.environ["HTTP_PROXY"] = HTTP_PROXY
     os.environ["http_proxy"] = HTTP_PROXY
@@ -243,8 +256,6 @@ def background_sync_loop() -> None:
 
 @app.on_event("startup")
 def startup_event() -> None:
-    # НИЧЕГО не синкаем блокирующе на старте.
-    # Сервис поднимется, /health будет жить, а синк пойдёт в фоне.
     thread = threading.Thread(target=background_sync_loop, daemon=True)
     thread.start()
 
