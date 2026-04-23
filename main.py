@@ -38,9 +38,6 @@ PLAYEROK_DDG5 = os.getenv("PLAYEROK_DDG5", "").strip()
 PLAYEROK_USER_AGENT = os.getenv("PLAYEROK_USER_AGENT", "").strip()
 PLAYEROK_COOKIES = os.getenv("PLAYEROK_COOKIES", "").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "*").strip()
-AUTO_RELIST_ENABLED = os.getenv("AUTO_RELIST_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-AUTO_RELIST_INTERVAL_SECONDS = int(os.getenv("AUTO_RELIST_INTERVAL_SECONDS", "90"))
-BINDINGS_PATH = Path(os.getenv("BINDINGS_PATH", "product_bindings.json")).resolve()
 
 # Прокси через env
 HTTP_PROXY = os.getenv("HTTP_PROXY", "").strip()
@@ -90,23 +87,10 @@ class RelistRequest(BaseModel):
     priorityStatusId: Optional[str] = None
 
 
-class BindingUpsertRequest(BaseModel):
-    productId: str
-    title: Optional[str] = None
-    itemId: Optional[str] = None
-    slug: Optional[str] = None
-    lotUrl: Optional[str] = None
-    priorityStatusId: Optional[str] = None
-    autoRelist: Optional[bool] = None
-    matchText: Optional[str] = None
-    notes: Optional[str] = None
-
-
 lock = threading.Lock()
 account: Optional[Account] = None
 orders_cache: List[Dict[str, Any]] = []
 items_cache: List[Dict[str, Any]] = []
-product_bindings: Dict[str, Dict[str, Any]] = {}
 stats_cache: Dict[str, Any] = {
     "reviews": 0,
     "rating": 0,
@@ -139,13 +123,6 @@ DONE_STATUSES = {
     "DELIVERED",
 }
 PENDING_STATUSES = {"PAID", "PENDING", "SENT"}
-RELISTABLE_ITEM_STATUSES = {
-    "SOLD",
-    "EXPIRED",
-    "DECLINED",
-    "BLOCKED",
-    "DRAFT",
-}
 DEFAULT_PRIORITY_STATUS_ID = "1f00f21b-7768-62a0-296f-75a31ee8ce72"
 
 
@@ -232,66 +209,6 @@ def extract_slug_from_url(url: Optional[str]) -> Optional[str]:
         return parts[-1]
     except Exception:
         return text.rstrip("/").split("/")[-1].split("?")[0] or None
-
-
-def ensure_parent_dir(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def load_bindings() -> Dict[str, Dict[str, Any]]:
-    ensure_parent_dir(BINDINGS_PATH)
-    if not BINDINGS_PATH.exists():
-        BINDINGS_PATH.write_text("{}", encoding="utf-8")
-        return {}
-    try:
-        raw = json.loads(BINDINGS_PATH.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
-    except Exception:
-        pass
-    return {}
-
-
-def save_bindings() -> None:
-    ensure_parent_dir(BINDINGS_PATH)
-    BINDINGS_PATH.write_text(
-        json.dumps(product_bindings, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def normalize_binding(product_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    lot_url = (data.get("lotUrl") or data.get("lot_url") or "").strip() or None
-    slug = (data.get("slug") or extract_slug_from_url(lot_url) or "").strip() or None
-    item_id = data.get("itemId") or data.get("item_id")
-    priority_status_id = data.get("priorityStatusId") or data.get("priority_status_id")
-    return {
-        "productId": str(product_id),
-        "title": data.get("title") or None,
-        "itemId": str(item_id) if item_id not in (None, "") else None,
-        "slug": slug,
-        "lotUrl": lot_url or (playerok_item_url(slug) if slug else None),
-        "priorityStatusId": str(priority_status_id) if priority_status_id not in (None, "") else None,
-        "autoRelist": bool(data.get("autoRelist", data.get("auto_relist", False))),
-        "matchText": data.get("matchText") or data.get("match_text") or None,
-        "notes": data.get("notes") or None,
-        "updatedAt": data.get("updatedAt") or data.get("updated_at") or datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def upsert_binding(product_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    current = product_bindings.get(str(product_id), {})
-    merged = {**current, **payload}
-    normalized = normalize_binding(str(product_id), merged)
-    product_bindings[str(product_id)] = normalized
-    save_bindings()
-    return normalized
-
-
-def binding_for_product(product_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not product_id:
-        return None
-    return product_bindings.get(str(product_id))
 
 
 def get_account() -> Account:
@@ -478,15 +395,6 @@ def find_cached_item(item_id: Optional[str] = None, slug: Optional[str] = None) 
     return None
 
 
-def find_cached_order(order_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not order_id:
-        return None
-    for order in orders_cache:
-        if order.get("id") == str(order_id):
-            return order
-    return None
-
-
 def get_item_live(item_id: Optional[str] = None, slug: Optional[str] = None) -> Any:
     acc = get_account().get()
     if item_id:
@@ -496,65 +404,19 @@ def get_item_live(item_id: Optional[str] = None, slug: Optional[str] = None) -> 
     raise RuntimeError("Item id/slug is missing")
 
 
-def resolve_item(
-    item_id: Optional[str] = None,
-    slug: Optional[str] = None,
-    lot_url: Optional[str] = None,
-    product_id: Optional[str] = None,
-    order_id: Optional[str] = None,
-) -> Any:
-    binding = binding_for_product(product_id)
-    if binding:
-        item_id = item_id or binding.get("itemId")
-        slug = slug or binding.get("slug")
-        lot_url = lot_url or binding.get("lotUrl")
-
-    order = find_cached_order(order_id)
-    if order:
-        order_item = order.get("item") or {}
-        item_id = item_id or order_item.get("id")
-        slug = slug or order_item.get("slug")
-        lot_url = lot_url or order.get("lot_url") or order_item.get("url")
-
+def resolve_item(item_id: Optional[str] = None, slug: Optional[str] = None, lot_url: Optional[str] = None) -> Any:
     slug = slug or extract_slug_from_url(lot_url)
 
     try:
-        item = get_item_live(item_id=item_id, slug=slug)
+        return get_item_live(item_id=item_id, slug=slug)
     except Exception:
         cached = find_cached_item(item_id=item_id, slug=slug)
         if cached:
-            item = get_item_live(item_id=cached.get("id"), slug=cached.get("slug"))
-        else:
-            raise
-
-    if product_id:
-        upsert_payload = {
-            "itemId": str(getattr(item, "id", "") or "") or None,
-            "slug": getattr(item, "slug", None),
-            "lotUrl": playerok_item_url(getattr(item, "slug", None)),
-        }
-        if binding:
-            if binding.get("title"):
-                upsert_payload["title"] = binding.get("title")
-            if binding.get("priorityStatusId"):
-                upsert_payload["priorityStatusId"] = binding.get("priorityStatusId")
-            upsert_payload["autoRelist"] = bool(binding.get("autoRelist", False))
-            if binding.get("matchText"):
-                upsert_payload["matchText"] = binding.get("matchText")
-        upsert_binding(str(product_id), upsert_payload)
-
-    return item
+            return get_item_live(item_id=cached.get("id"), slug=cached.get("slug"))
+        raise
 
 
-def choose_priority_status(
-    item: Any,
-    for_relist: bool = False,
-    requested_id: Optional[str] = None,
-    product_id: Optional[str] = None,
-) -> str:
-    binding = binding_for_product(product_id)
-    requested_id = requested_id or (binding.get("priorityStatusId") if binding else None)
-
+def choose_priority_status(item: Any, for_relist: bool = False, requested_id: Optional[str] = None) -> str:
     acc = get_account().get()
     price = int(getattr(item, "raw_price", None) or getattr(item, "price", 0) or 0)
 
@@ -577,7 +439,7 @@ def choose_priority_status(
         if bucket:
             return str(getattr(bucket[0], "id"))
 
-    return requested_id or DEFAULT_PRIORITY_STATUS_ID
+    return DEFAULT_PRIORITY_STATUS_ID
 
 
 MINIMAL_PUBLISH_QUERY = """
@@ -647,14 +509,9 @@ def graphql_bump(item_id: str, priority_status_id: str) -> Dict[str, Any]:
     return response.get("data", {}).get("increaseItemPriorityStatus") or {}
 
 
-def perform_bump(item: Any, requested_id: Optional[str] = None, product_id: Optional[str] = None) -> Dict[str, Any]:
+def perform_bump(item: Any, requested_id: Optional[str] = None) -> Dict[str, Any]:
     item_id = str(getattr(item, "id"))
-    priority_status_id = choose_priority_status(
-        item,
-        for_relist=False,
-        requested_id=requested_id,
-        product_id=product_id,
-    )
+    priority_status_id = choose_priority_status(item, for_relist=False, requested_id=requested_id)
     acc = get_account().get()
 
     try:
@@ -663,7 +520,7 @@ def perform_bump(item: Any, requested_id: Optional[str] = None, product_id: Opti
             priority_status_id=priority_status_id,
             transaction_provider_id=TransactionProviderIds.LOCAL,
         )
-        result = {
+        return {
             "item_id": item_id,
             "slug": getattr(updated, "slug", getattr(item, "slug", None)),
             "lot_url": playerok_item_url(getattr(updated, "slug", getattr(item, "slug", None))),
@@ -675,7 +532,7 @@ def perform_bump(item: Any, requested_id: Optional[str] = None, product_id: Opti
         }
     except Exception:
         raw = graphql_bump(item_id=item_id, priority_status_id=priority_status_id)
-        result = {
+        return {
             "item_id": item_id,
             "slug": raw.get("slug") or getattr(item, "slug", None),
             "lot_url": playerok_item_url(raw.get("slug") or getattr(item, "slug", None)),
@@ -686,24 +543,10 @@ def perform_bump(item: Any, requested_id: Optional[str] = None, product_id: Opti
             "mode": "graphql-fallback",
         }
 
-    if product_id:
-        upsert_binding(str(product_id), {
-            "itemId": result.get("item_id"),
-            "slug": result.get("slug"),
-            "lotUrl": result.get("lot_url"),
-            "priorityStatusId": result.get("priority_status_id"),
-        })
-    return result
 
-
-def perform_relist(item: Any, requested_id: Optional[str] = None, product_id: Optional[str] = None) -> Dict[str, Any]:
+def perform_relist(item: Any, requested_id: Optional[str] = None) -> Dict[str, Any]:
     item_id = str(getattr(item, "id"))
-    priority_status_id = choose_priority_status(
-        item,
-        for_relist=True,
-        requested_id=requested_id,
-        product_id=product_id,
-    )
+    priority_status_id = choose_priority_status(item, for_relist=True, requested_id=requested_id)
     acc = get_account().get()
 
     try:
@@ -712,7 +555,7 @@ def perform_relist(item: Any, requested_id: Optional[str] = None, product_id: Op
             priority_status_id=priority_status_id,
             transaction_provider_id=TransactionProviderIds.LOCAL,
         )
-        result = {
+        return {
             "item_id": item_id,
             "slug": getattr(updated, "slug", getattr(item, "slug", None)),
             "lot_url": playerok_item_url(getattr(updated, "slug", getattr(item, "slug", None))),
@@ -724,7 +567,7 @@ def perform_relist(item: Any, requested_id: Optional[str] = None, product_id: Op
         }
     except Exception:
         raw = graphql_publish(item_id=item_id, priority_status_id=priority_status_id)
-        result = {
+        return {
             "item_id": item_id,
             "slug": raw.get("slug") or getattr(item, "slug", None),
             "lot_url": playerok_item_url(raw.get("slug") or getattr(item, "slug", None)),
@@ -734,15 +577,6 @@ def perform_relist(item: Any, requested_id: Optional[str] = None, product_id: Op
             "ok": True,
             "mode": "graphql-fallback",
         }
-
-    if product_id:
-        upsert_binding(str(product_id), {
-            "itemId": result.get("item_id"),
-            "slug": result.get("slug"),
-            "lotUrl": result.get("lot_url"),
-            "priorityStatusId": result.get("priority_status_id"),
-        })
-    return result
 
 
 def build_stats(deals: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -798,41 +632,14 @@ def sync_once() -> None:
             }
 
 
-def maybe_auto_relist_once() -> None:
-    if not AUTO_RELIST_ENABLED:
-        return
-
-    for product_id, binding in list(product_bindings.items()):
-        if not binding.get("autoRelist"):
-            continue
-        try:
-            item = resolve_item(
-                item_id=binding.get("itemId"),
-                slug=binding.get("slug"),
-                lot_url=binding.get("lotUrl"),
-                product_id=product_id,
-            )
-            status = enum_to_str(getattr(item, "status", None))
-            if status in RELISTABLE_ITEM_STATUSES:
-                perform_relist(item, requested_id=binding.get("priorityStatusId"), product_id=product_id)
-        except Exception:
-            continue
-
-
 def background_sync_loop() -> None:
     while True:
         sync_once()
-        try:
-            maybe_auto_relist_once()
-        except Exception:
-            pass
         time.sleep(SYNC_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
 def startup_event() -> None:
-    global product_bindings
-    product_bindings = load_bindings()
     thread = threading.Thread(target=background_sync_loop, daemon=True)
     thread.start()
 
@@ -848,8 +655,6 @@ def health() -> Dict[str, Any]:
             "proxy_enabled": bool(HTTP_PROXY or HTTPS_PROXY),
             "auth_mode": "cookies" if PARSED_COOKIES else "token",
             "has_ddg5": bool(PLAYEROK_DDG5 or (PARSED_COOKIES and PARSED_COOKIES.get("__ddg5_"))),
-            "bindings_count": len(product_bindings),
-            "auto_relist_enabled": AUTO_RELIST_ENABLED,
         }
 
 
@@ -877,53 +682,6 @@ def get_items_endpoint() -> Dict[str, Any]:
         }
 
 
-@app.get("/lots")
-def get_lots_endpoint() -> Dict[str, Any]:
-    with lock:
-        mapped: List[Dict[str, Any]] = []
-        for item in items_cache:
-            item_id = str(item.get("id") or "")
-            attached_bindings = [b for b in product_bindings.values() if (b.get("itemId") and str(b.get("itemId")) == item_id) or (b.get("slug") and b.get("slug") == item.get("slug"))]
-            mapped.append({
-                **item,
-                "bindings": attached_bindings,
-                "bound_product_ids": [b.get("productId") for b in attached_bindings],
-            })
-        return {
-            "count": len(mapped),
-            "lots": mapped,
-            "bindings_count": len(product_bindings),
-        }
-
-
-@app.get("/bindings")
-def get_bindings() -> Dict[str, Any]:
-    return {
-        "count": len(product_bindings),
-        "bindings": list(product_bindings.values()),
-    }
-
-
-@app.post("/bindings/upsert")
-def bindings_upsert(payload: BindingUpsertRequest) -> Dict[str, Any]:
-    binding = upsert_binding(payload.productId, payload.model_dump(exclude_none=True))
-    return {
-        "ok": True,
-        "binding": binding,
-    }
-
-
-@app.delete("/bindings/{product_id}")
-def bindings_delete(product_id: str) -> Dict[str, Any]:
-    existed = product_bindings.pop(str(product_id), None)
-    save_bindings()
-    return {
-        "ok": True,
-        "deleted": bool(existed),
-        "productId": str(product_id),
-    }
-
-
 @app.post("/sync-now")
 def sync_now() -> Dict[str, Any]:
     sync_once()
@@ -934,7 +692,6 @@ def sync_now() -> Dict[str, Any]:
             "last_error": last_error,
             "orders_count": len(orders_cache),
             "items_count": len(items_cache),
-            "bindings_count": len(product_bindings),
         }
 
 
@@ -971,13 +728,8 @@ def confirm_order(deal_id: str) -> Dict[str, Any]:
 @app.post("/bump")
 def bump_item(payload: BumpRequest) -> Dict[str, Any]:
     try:
-        item = resolve_item(
-            item_id=payload.itemId,
-            slug=payload.slug,
-            lot_url=payload.lotUrl,
-            product_id=payload.productId,
-        )
-        result = perform_bump(item=item, requested_id=payload.priorityStatusId, product_id=payload.productId)
+        item = resolve_item(item_id=payload.itemId, slug=payload.slug, lot_url=payload.lotUrl)
+        result = perform_bump(item=item, requested_id=payload.priorityStatusId)
         sync_once()
         return result
     except Exception as exc:
@@ -987,32 +739,12 @@ def bump_item(payload: BumpRequest) -> Dict[str, Any]:
 @app.post("/relist")
 def relist_item(payload: RelistRequest) -> Dict[str, Any]:
     try:
-        item = resolve_item(
-            item_id=payload.itemId,
-            slug=payload.slug,
-            lot_url=payload.lotUrl,
-            product_id=payload.productId,
-            order_id=payload.orderId,
-        )
-        result = perform_relist(item=item, requested_id=payload.priorityStatusId, product_id=payload.productId)
+        item = resolve_item(item_id=payload.itemId, slug=payload.slug, lot_url=payload.lotUrl)
+        result = perform_relist(item=item, requested_id=payload.priorityStatusId)
         sync_once()
         return {
             **result,
             "order_id": payload.orderId,
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/auto-relist/run")
-def auto_relist_run() -> Dict[str, Any]:
-    try:
-        maybe_auto_relist_once()
-        sync_once()
-        return {
-            "ok": True,
-            "bindings_count": len(product_bindings),
-            "auto_relist_enabled": AUTO_RELIST_ENABLED,
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
